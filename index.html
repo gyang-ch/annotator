@@ -1,0 +1,756 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>照片标注</title>
+<!--
+  ════════════════════════════════════════════════════════════════════════════
+  GitHub Pages deployment
+  ════════════════════════════════════════════════════════════════════════════
+  Repo structure expected:
+    index.html          ← this file
+    photo_list.json     ← list of all filenames (auto-generated)
+    thumbnail/          ← all thumbnail photos
+
+  Annotations are saved in the browser's localStorage (no server needed).
+  Each annotator clicks "导出标注" to download their annotations.jsonl,
+  then sends the file back to you for merging.
+  ════════════════════════════════════════════════════════════════════════════
+-->
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:      #141414;
+  --surface: #1c1c1c;
+  --s2:      #242424;
+  --border:  #3a3a3a;
+  --text:    #f0f0f0;
+  --muted:   #b0b0b0;
+  --accent:  #5b9cf6;
+  --green:   #4ecb82;
+  --yellow:  #f0aa28;
+  --red:     #f06060;
+}
+
+body {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', BlinkMacSystemFont,
+               'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+}
+
+/* ── Loading overlay ── */
+#loading {
+  position: fixed; inset: 0; z-index: 999;
+  background: var(--bg);
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 14px;
+}
+#loading-msg { font-size: 14px; color: var(--text); }
+#loading-sub { font-size: 11px; color: var(--muted); text-align: center; max-width: 36ch; line-height: 1.6; }
+.spinner {
+  width: 32px; height: 32px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Error screen ── */
+#error-screen {
+  position: fixed; inset: 0; z-index: 998;
+  background: var(--bg);
+  display: none;
+  flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px; padding: 2rem;
+}
+#error-screen.show { display: flex; }
+#error-title  { font-size: 16px; color: var(--red); }
+#error-detail { font-size: 12px; color: var(--text);  max-width: 60ch; text-align: center; line-height: 1.7; white-space: pre-wrap; }
+#error-hint   { font-size: 11px; color: var(--muted); max-width: 60ch; text-align: center; line-height: 1.8; white-space: pre-wrap; font-family: monospace; }
+
+/* ── Sidebar ── */
+#sidebar {
+  width: 210px; min-width: 210px;
+  display: flex; flex-direction: column;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+#sidebar-header {
+  padding: 10px 10px 8px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+#progress-bar-wrap {
+  background: var(--s2); border-radius: 3px;
+  height: 6px; margin-bottom: 7px; overflow: hidden;
+}
+#progress-bar {
+  height: 100%; background: var(--green);
+  border-radius: 3px; transition: width 0.3s; width: 0%;
+}
+#progress-text { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+#filter-row { display: flex; gap: 4px; margin-bottom: 7px; }
+.filter-btn {
+  flex: 1; padding: 3px 0;
+  border: 1px solid var(--border); border-radius: 3px;
+  background: var(--s2); color: var(--muted);
+  font-size: 11px; cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.filter-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+#search {
+  width: 100%; padding: 4px 7px;
+  background: var(--s2); border: 1px solid var(--border);
+  border-radius: 3px; color: var(--text); font-size: 11px; outline: none;
+}
+#search:focus { border-color: var(--accent); }
+
+#photo-list {
+  flex: 1; overflow-y: auto;
+  scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+}
+.list-item {
+  display: flex; align-items: center; gap: 7px;
+  padding: 5px 10px; cursor: pointer;
+  border-bottom: 1px solid #1e1e1e;
+  transition: background 0.1s; user-select: none;
+}
+.list-item:hover  { background: var(--s2); }
+.list-item.active { background: #2a3a5c; }
+.list-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  flex-shrink: 0; background: var(--border);
+}
+.list-dot.labeled { background: var(--green); }
+.list-name {
+  font-size: 11px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1;
+}
+.list-item.active .list-name { color: #fff; }
+
+/* ── Photo area ── */
+#photo-area {
+  flex: 1; display: flex; flex-direction: column;
+  overflow: hidden; position: relative; background: #0e0e0e;
+}
+#photo-topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 14px;
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  flex-shrink: 0; gap: 10px;
+}
+#photo-name {
+  font-size: 12px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1;
+}
+#nav-info { font-size: 11px; color: var(--muted); white-space: nowrap; }
+#nav-row  { display: flex; gap: 6px; flex-shrink: 0; }
+.nav-btn {
+  padding: 3px 11px;
+  background: var(--s2); border: 1px solid var(--border); border-radius: 3px;
+  color: var(--text); cursor: pointer; font-size: 13px;
+  transition: background 0.15s;
+}
+.nav-btn:hover { background: #333; }
+
+#photo-frame {
+  flex: 1; display: flex;
+  align-items: center; justify-content: center;
+  overflow: hidden; position: relative;
+}
+#main-photo {
+  max-width: 100%; max-height: 100%;
+  object-fit: contain; display: block;
+  opacity: 0; transition: opacity 0.2s;
+}
+#main-photo.loaded { opacity: 1; }
+#photo-spinner {
+  position: absolute; color: var(--muted); font-size: 13px; display: none;
+}
+#photo-spinner.show { display: block; }
+
+/* ── Controls panel ── */
+#controls {
+  width: 260px; min-width: 260px;
+  display: flex; flex-direction: column;
+  background: var(--surface); border-left: 1px solid var(--border);
+  overflow-y: auto;
+  scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+}
+.ctrl-section { padding: 14px 16px; border-bottom: 1px solid var(--border); }
+.ctrl-label {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em;
+  color: var(--muted); margin-bottom: 10px;
+  display: flex; align-items: center; gap: 6px;
+}
+.key-hint {
+  background: var(--s2); border: 1px solid var(--border); border-radius: 3px;
+  padding: 1px 5px; font-size: 10px; color: var(--muted); font-family: monospace;
+}
+
+/* ── Myself choice buttons ── */
+.choice-row {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+}
+.choice-btn {
+  padding: 13px 4px;
+  border-radius: 6px; border: 2px solid var(--border);
+  background: var(--s2); color: var(--muted);
+  font-size: 14px; font-weight: 600; cursor: pointer;
+  transition: all 0.15s; text-align: center;
+}
+.choice-btn:hover { background: #333; color: var(--text); border-color: var(--muted); }
+.choice-btn.sel-yes {
+  background: #1a3a2a; border-color: var(--green); color: var(--green);
+}
+.choice-btn.sel-no {
+  background: #2e1a1a; border-color: var(--red); color: var(--red);
+}
+#myself-warn {
+  margin-top: 7px; font-size: 11px; color: var(--yellow);
+  display: none;
+}
+#myself-warn.show { display: block; }
+
+/* ── People counter ── */
+.counter { display: flex; align-items: center; gap: 10px; }
+.counter-btn {
+  width: 34px; height: 34px; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--s2);
+  color: var(--text); font-size: 20px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  line-height: 1; transition: background 0.15s; user-select: none;
+}
+.counter-btn:hover  { background: #333; }
+.counter-btn:active { background: #444; }
+#people-count {
+  flex: 1; text-align: center; padding: 6px;
+  background: var(--s2); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--text);
+  font-size: 22px; font-weight: 600; outline: none;
+  -moz-appearance: textfield;
+}
+#people-count::-webkit-outer-spin-button,
+#people-count::-webkit-inner-spin-button { -webkit-appearance: none; }
+#people-count:focus { border-color: var(--accent); }
+
+/* ── Save button ── */
+#save-btn {
+  margin: 14px 16px; padding: 13px;
+  border-radius: 6px; border: none;
+  background: var(--accent); color: #fff;
+  font-size: 14px; font-weight: 600; cursor: pointer;
+  transition: background 0.15s, transform 0.08s;
+  letter-spacing: 0.02em;
+}
+#save-btn:hover   { background: #3a78e0; }
+#save-btn:active  { transform: scale(0.98); }
+#save-btn:disabled { background: #333; color: var(--muted); cursor: default; transform: none; }
+
+#save-status {
+  font-size: 11px; color: var(--muted);
+  text-align: center; padding: 4px 16px 0; min-height: 18px;
+}
+
+/* ── Jump button ── */
+#jump-btn {
+  width: 100%; padding: 7px;
+  background: var(--s2); border: 1px solid var(--border); border-radius: 4px;
+  color: var(--text); font-size: 12px; cursor: pointer;
+  transition: background 0.15s;
+}
+#jump-btn:hover { background: #333; }
+
+/* ── Keyboard hints ── */
+.hints-grid {
+  display: grid; grid-template-columns: auto 1fr;
+  gap: 4px 10px; font-size: 11px; color: var(--muted);
+}
+.hint-key {
+  font-family: monospace; background: var(--s2);
+  border: 1px solid var(--border); border-radius: 3px;
+  padding: 1px 5px; color: var(--text); white-space: nowrap;
+}
+
+/* ── Toast ── */
+#toast {
+  position: fixed; bottom: 20px; left: 50%;
+  transform: translateX(-50%) translateY(20px);
+  background: #222; color: #fff;
+  padding: 8px 18px; border-radius: 6px;
+  font-size: 13px; opacity: 0; pointer-events: none;
+  transition: opacity 0.2s, transform 0.2s;
+  z-index: 100; border: 1px solid var(--border);
+}
+#toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+#toast.ok   { border-color: var(--green);  color: var(--green); }
+#toast.warn { border-color: var(--yellow); color: var(--yellow); }
+#toast.err  { border-color: var(--red);    color: var(--red); }
+</style>
+</head>
+<body>
+
+<!-- 加载中 -->
+<div id="loading">
+  <div class="spinner"></div>
+  <div id="loading-msg">正在连接 Azure…</div>
+  <div id="loading-sub"></div>
+</div>
+
+<!-- 错误界面 -->
+<div id="error-screen">
+  <div id="error-title">无法连接 Azure 存储</div>
+  <div id="error-detail"></div>
+  <div id="error-hint"></div>
+</div>
+
+<!-- 主界面（加载完成后显示） -->
+<div id="sidebar" style="display:none">
+  <div id="sidebar-header">
+    <div id="progress-bar-wrap"><div id="progress-bar"></div></div>
+    <div id="progress-text">加载中…</div>
+    <div id="filter-row">
+      <button class="filter-btn active" data-filter="all">全部</button>
+      <button class="filter-btn" data-filter="unlabeled">待标注</button>
+      <button class="filter-btn" data-filter="labeled">已完成</button>
+    </div>
+    <input id="search" type="text" placeholder="搜索文件名…" autocomplete="off">
+  </div>
+  <div id="photo-list"></div>
+</div>
+
+<div id="photo-area" style="display:none">
+  <div id="photo-topbar">
+    <div id="photo-name">—</div>
+    <div id="nav-row">
+      <button class="nav-btn" id="prev-btn">◀</button>
+      <button class="nav-btn" id="next-btn">▶</button>
+    </div>
+    <div id="nav-info"></div>
+  </div>
+  <div id="photo-frame">
+    <span id="photo-spinner">加载中…</span>
+    <img id="main-photo" src="" alt="">
+  </div>
+</div>
+
+<div id="controls" style="display:none">
+
+  <div class="ctrl-section">
+    <div class="ctrl-label">
+      照片中有我吗？
+      <span class="key-hint">Y / N</span>
+    </div>
+    <div class="choice-row">
+      <button class="choice-btn" id="btn-yes" data-val="true">有，是我</button>
+      <button class="choice-btn" id="btn-no"  data-val="false">不是我</button>
+    </div>
+    <div id="myself-warn">请先选择是否本人在照片中</div>
+  </div>
+
+  <div class="ctrl-section">
+    <div class="ctrl-label">
+      主要人物数量（不含路人）
+      <span class="key-hint">0–9</span>
+    </div>
+    <div class="counter">
+      <button class="counter-btn" id="dec-btn">−</button>
+      <input id="people-count" type="number" min="0" max="99" value="0">
+      <button class="counter-btn" id="inc-btn">+</button>
+    </div>
+  </div>
+
+  <button id="save-btn">保存并下一张&nbsp;&nbsp;[Enter]</button>
+  <div id="save-status"></div>
+
+  <div class="ctrl-section">
+    <button id="jump-btn">跳到第一张未标注</button>
+  </div>
+
+  <div class="ctrl-section">
+    <button id="export-btn">导出标注文件</button>
+  </div>
+
+  <div class="ctrl-section">
+    <div class="hints-grid">
+      <span class="hint-key">Y</span>            <span>选择"有，是我"</span>
+      <span class="hint-key">N</span>            <span>选择"不是我"</span>
+      <span class="hint-key">0–9</span>          <span>设置人物数量</span>
+      <span class="hint-key">Enter</span>        <span>保存并下一张</span>
+      <span class="hint-key">← →</span>          <span>浏览（不保存）</span>
+    </div>
+  </div>
+
+</div>
+
+<div id="toast"></div>
+
+<script>
+'use strict';
+
+// ── 存储键 ──────────────────────────────────────────────────────────────────
+const LS_KEY = 'photo_annotations_v1';
+
+// ── 本地工具函数 ──────────────────────────────────────────────────────────────
+
+function thumbUrl(filename) {
+  return `./thumbnail/${encodeURIComponent(filename)}`;
+}
+
+// 从 photo_list.json 获取照片列表
+async function listPhotos() {
+  const res = await fetch('./photo_list.json');
+  if (!res.ok) throw new Error(`无法加载照片列表：HTTP ${res.status}`);
+  return await res.json();
+}
+
+// 从 localStorage 读取标注
+function loadAnnotations() {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return new Map();
+    const map = new Map();
+    for (const line of raw.split('\n')) {
+      const t = line.trim();
+      if (!t) continue;
+      const r = JSON.parse(t);
+      if (r.filename) map.set(r.filename, r);
+    }
+    return map;
+  } catch { return new Map(); }
+}
+
+// 将标注写入 localStorage
+function saveAnnotations(map) {
+  const text = [...map.values()].map(r => JSON.stringify(r)).join('\n');
+  localStorage.setItem(LS_KEY, text);
+}
+
+// 保存单条标注
+function persistAnnotation(filename, myself, mainPeople) {
+  annotations.set(filename, { filename, myself, main_people: mainPeople });
+  saveAnnotations(annotations);
+}
+
+// 导出标注为 annotations.jsonl 文件下载
+function exportAnnotations() {
+  if (annotations.size === 0) { showToast('暂无标注数据', 'warn'); return; }
+  const text = [...annotations.values()].map(r => JSON.stringify(r)).join('\n') + '\n';
+  const blob = new Blob([text], { type: 'text/plain' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url; a.download = 'annotations.jsonl';
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast('已导出 annotations.jsonl', 'ok');
+}
+
+// ── 应用状态 ─────────────────────────────────────────────────────────────────
+
+let allPhotos   = [];
+let annotations = new Map();
+let filtered    = [];
+let currentFile = null;
+let filterMode  = 'all';
+let searchTerm  = '';
+
+// form.myself: null = 未选择, true = 是我, false = 不是我
+let form = { myself: null, main_people: 0 };
+
+// ── DOM 引用 ─────────────────────────────────────────────────────────────────
+
+const loadingEl   = document.getElementById('loading');
+const loadingMsg  = document.getElementById('loading-msg');
+const errorScreen = document.getElementById('error-screen');
+const errorDetail = document.getElementById('error-detail');
+const errorHint   = document.getElementById('error-hint');
+const sidebarEl   = document.getElementById('sidebar');
+const photoAreaEl = document.getElementById('photo-area');
+const controlsEl  = document.getElementById('controls');
+const listEl      = document.getElementById('photo-list');
+const photoEl     = document.getElementById('main-photo');
+const spinnerEl   = document.getElementById('photo-spinner');
+const photoNameEl = document.getElementById('photo-name');
+const navInfoEl   = document.getElementById('nav-info');
+const progressBar = document.getElementById('progress-bar');
+const progressTxt = document.getElementById('progress-text');
+const btnYes      = document.getElementById('btn-yes');
+const btnNo       = document.getElementById('btn-no');
+const myselfWarn  = document.getElementById('myself-warn');
+const peopleInput = document.getElementById('people-count');
+const saveBtn     = document.getElementById('save-btn');
+const toastEl     = document.getElementById('toast');
+const jumpBtn     = document.getElementById('jump-btn');
+
+// ── 初始化 ───────────────────────────────────────────────────────────────────
+
+async function init() {
+  try {
+    loadingMsg.textContent = '正在加载照片列表…';
+    allPhotos   = await listPhotos();
+    annotations = loadAnnotations();
+
+    loadingEl.style.display   = 'none';
+    sidebarEl.style.display   = '';
+    photoAreaEl.style.display = '';
+    controlsEl.style.display  = '';
+
+    applyFilter();
+    updateProgress();
+
+    if (filtered.length > 0) {
+      const saved    = localStorage.getItem('lastPhoto');
+      const savedIdx = saved ? filtered.indexOf(saved) : -1;
+      if (savedIdx >= 0) {
+        navigateTo(savedIdx);
+      } else {
+        const first = filtered.findIndex(f => !annotations.has(f));
+        navigateTo(first >= 0 ? first : 0);
+      }
+    }
+  } catch (err) {
+    loadingEl.style.display = 'none';
+    errorScreen.classList.add('show');
+    errorDetail.textContent = String(err);
+  }
+}
+
+// ── 筛选与列表 ───────────────────────────────────────────────────────────────
+
+function applyFilter() {
+  const term = searchTerm.toLowerCase();
+  filtered = allPhotos.filter(f => {
+    if (term && !f.toLowerCase().includes(term)) return false;
+    if (filterMode === 'unlabeled') return !annotations.has(f);
+    if (filterMode === 'labeled')   return  annotations.has(f);
+    return true;
+  });
+  renderList();
+}
+
+function renderList() {
+  listEl.innerHTML = '';
+  const frag = document.createDocumentFragment();
+  filtered.forEach((fn, idx) => {
+    const div  = document.createElement('div');
+    div.className = 'list-item' + (fn === currentFile ? ' active' : '');
+
+    const dot  = document.createElement('div');
+    dot.className = 'list-dot' + (annotations.has(fn) ? ' labeled' : '');
+
+    const name = document.createElement('div');
+    name.className = 'list-name';
+    name.textContent = fn;
+
+    div.appendChild(dot);
+    div.appendChild(name);
+    div.addEventListener('click', () => navigateTo(idx));
+    frag.appendChild(div);
+  });
+  listEl.appendChild(frag);
+}
+
+function updateListItem(fn) {
+  const idx = filtered.indexOf(fn);
+  if (idx < 0) return;
+  listEl.children[idx]?.querySelector('.list-dot')
+    .classList.toggle('labeled', annotations.has(fn));
+}
+
+function scrollListToActive() {
+  const idx = filtered.indexOf(currentFile);
+  if (idx >= 0) listEl.children[idx]?.scrollIntoView({ block: 'nearest' });
+}
+
+// ── 导航 ─────────────────────────────────────────────────────────────────────
+
+function navigateTo(idx) {
+  if (!filtered.length) return;
+  idx = Math.max(0, Math.min(filtered.length - 1, idx));
+  const fn = filtered[idx];
+
+  if (currentFile) {
+    const old = filtered.indexOf(currentFile);
+    if (old >= 0) listEl.children[old]?.classList.remove('active');
+  }
+
+  currentFile = fn;
+  localStorage.setItem('lastPhoto', fn);
+  listEl.children[idx]?.classList.add('active');
+  scrollListToActive();
+
+  photoNameEl.textContent = fn;
+  navInfoEl.textContent   = `${idx + 1} / ${filtered.length}`;
+  loadPhoto(fn);
+  loadForm(fn);
+}
+
+function currentIndex() { return filtered.indexOf(currentFile); }
+function navigate(delta, jump = 1) { navigateTo(currentIndex() + delta * jump); }
+
+// ── 照片加载 ─────────────────────────────────────────────────────────────────
+
+function loadPhoto(fn) {
+  photoEl.classList.remove('loaded');
+  spinnerEl.classList.add('show');
+  spinnerEl.textContent = '加载中…';
+
+  const src = thumbUrl(fn);
+  const img = new Image();
+  img.onload  = () => { photoEl.src = src; photoEl.classList.add('loaded'); spinnerEl.classList.remove('show'); };
+  img.onerror = () => { spinnerEl.textContent = '图片加载失败'; };
+  img.src = src;
+
+  const nx = currentIndex() + 1;
+  if (nx < filtered.length) new Image().src = thumbUrl(filtered[nx]);
+}
+
+// ── 表单 ─────────────────────────────────────────────────────────────────────
+
+function loadForm(fn) {
+  const saved = annotations.get(fn);
+  // null = 未选择（新照片或无记录）
+  form.myself      = saved ? saved.myself : null;
+  form.main_people = saved?.main_people ?? 0;
+  syncFormUI();
+}
+
+function syncFormUI() {
+  btnYes.classList.remove('sel-yes', 'sel-no');
+  btnNo.classList.remove('sel-yes', 'sel-no');
+  myselfWarn.classList.remove('show');
+
+  if (form.myself === true)  btnYes.classList.add('sel-yes');
+  if (form.myself === false) btnNo.classList.add('sel-no');
+
+  peopleInput.value = form.main_people;
+}
+
+function setMyself(val) {
+  form.myself = val;
+  myselfWarn.classList.remove('show');
+  syncFormUI();
+}
+
+function setPeople(val) {
+  val = parseInt(val, 10);
+  form.main_people = isNaN(val) || val < 0 ? 0 : val;
+  syncFormUI();
+}
+
+// ── 保存 ─────────────────────────────────────────────────────────────────────
+
+function saveAndNext() {
+  if (!currentFile) return;
+
+  if (form.myself === null) {
+    myselfWarn.classList.add('show');
+    showToast('请先选择照片中是否有我', 'warn');
+    return;
+  }
+
+  persistAnnotation(currentFile, form.myself, form.main_people);
+  updateListItem(currentFile);
+  updateProgress();
+  showToast('已保存 ✓', 'ok');
+
+  if (filterMode === 'unlabeled') {
+    const prev = currentFile;
+    applyFilter();
+    if (!filtered.includes(prev)) navigateTo(Math.min(currentIndex(), filtered.length - 1));
+  } else {
+    navigate(1);
+  }
+}
+
+// ── 进度 ─────────────────────────────────────────────────────────────────────
+
+function updateProgress() {
+  const total = allPhotos.length;
+  const done  = allPhotos.filter(f => annotations.has(f)).length;
+  const pct   = total > 0 ? (done / total * 100).toFixed(1) : 0;
+  progressBar.style.width = pct + '%';
+  progressTxt.textContent = `${done} / ${total} 已标注（${pct}%）`;
+}
+
+// ── 提示弹窗 ─────────────────────────────────────────────────────────────────
+
+let toastTimer = null;
+function showToast(msg, type = '') {
+  toastEl.textContent = msg;
+  toastEl.className   = 'show ' + type;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toastEl.className = ''; }, 1800);
+}
+
+// ── 事件绑定 ─────────────────────────────────────────────────────────────────
+
+btnYes.addEventListener('click', () => setMyself(true));
+btnNo.addEventListener('click',  () => setMyself(false));
+
+document.getElementById('inc-btn').addEventListener('click', () => setPeople(form.main_people + 1));
+document.getElementById('dec-btn').addEventListener('click', () => setPeople(form.main_people - 1));
+peopleInput.addEventListener('input', () => setPeople(peopleInput.value));
+
+saveBtn.addEventListener('click', saveAndNext);
+
+document.getElementById('prev-btn').addEventListener('click', () => navigate(-1));
+document.getElementById('next-btn').addEventListener('click', () => navigate(1));
+
+document.getElementById('export-btn').addEventListener('click', exportAnnotations);
+
+jumpBtn.addEventListener('click', () => {
+  const idx = filtered.findIndex(f => !annotations.has(f));
+  if (idx >= 0) navigateTo(idx);
+  else showToast('所有照片均已标注！', 'ok');
+});
+
+document.querySelectorAll('.filter-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.filter-btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    filterMode = b.dataset.filter;
+    applyFilter();
+    if (filtered.length > 0) navigateTo(0);
+  });
+});
+
+document.getElementById('search').addEventListener('input', e => {
+  searchTerm = e.target.value;
+  applyFilter();
+  if (filtered.length > 0) navigateTo(0);
+});
+
+document.addEventListener('keydown', e => {
+  if (document.activeElement.tagName === 'INPUT' &&
+      document.activeElement.type   === 'text') return;
+
+  switch (e.key) {
+    case 'ArrowRight': e.preventDefault(); navigate( 1); break;
+    case 'ArrowLeft':  e.preventDefault(); navigate(-1); break;
+    case 'Enter':      e.preventDefault(); saveAndNext(); break;
+    case 'y': case 'Y': setMyself(true);  break;
+    case 'n': case 'N': setMyself(false); break;
+    default:
+      if (e.key >= '0' && e.key <= '9' && document.activeElement !== peopleInput) {
+        setPeople(parseInt(e.key, 10));
+      }
+  }
+});
+
+// ── 启动 ─────────────────────────────────────────────────────────────────────
+
+init().catch(err => showError(err));
+</script>
+</body>
+</html>
