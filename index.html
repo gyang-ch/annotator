@@ -117,11 +117,14 @@ body {
 
 #photo-list {
   flex: 1; overflow-y: auto;
+  position: relative;          /* anchor for absolutely-positioned virtual items */
   scrollbar-width: thin; scrollbar-color: var(--border) transparent;
 }
 .list-item {
+  position: absolute; left: 0; right: 0;
+  height: 28px;
   display: flex; align-items: center; gap: 7px;
-  padding: 5px 10px; cursor: pointer;
+  padding: 0 10px; cursor: pointer;
   border-bottom: 1px solid #1e1e1e;
   transition: background 0.1s; user-select: none;
 }
@@ -546,6 +549,10 @@ async function init() {
 
 // ── 筛选与列表 ───────────────────────────────────────────────────────────────
 
+// ── Virtual scroll constants ──────────────────────────────────────────────────
+const ITEM_H = 28;   // px — must match CSS height on .list-item
+const VS_BUF = 8;    // extra items rendered above and below the viewport
+
 function applyFilter() {
   const term = searchTerm.toLowerCase();
   filtered = allPhotos.filter(f => {
@@ -557,14 +564,37 @@ function applyFilter() {
   renderList();
 }
 
+// Set up the virtual scroll spacer and render the initial visible window
 function renderList() {
   listEl.innerHTML = '';
-  const frag = document.createDocumentFragment();
-  filtered.forEach((fn, idx) => {
-    const div  = document.createElement('div');
-    div.className = 'list-item' + (fn === currentFile ? ' active' : '');
+  // Spacer gives the container its full scrollable height without real nodes
+  const spacer = document.createElement('div');
+  spacer.id = 'vs-spacer';
+  spacer.style.height = `${filtered.length * ITEM_H}px`;
+  listEl.appendChild(spacer);
+  renderVisibleItems();
+}
 
-    const dot  = document.createElement('div');
+// Render only the items currently in (or near) the viewport
+function renderVisibleItems() {
+  const scrollTop = listEl.scrollTop;
+  const viewH     = listEl.clientHeight;
+
+  const start = Math.max(0,              Math.floor(scrollTop / ITEM_H) - VS_BUF);
+  const end   = Math.min(filtered.length, Math.ceil((scrollTop + viewH) / ITEM_H) + VS_BUF);
+
+  // Remove previously rendered items (leave spacer intact)
+  listEl.querySelectorAll('.list-item').forEach(el => el.remove());
+
+  const frag = document.createDocumentFragment();
+  for (let i = start; i < end; i++) {
+    const fn  = filtered[i];
+    const div = document.createElement('div');
+    div.className   = 'list-item' + (fn === currentFile ? ' active' : '');
+    div.dataset.idx = i;
+    div.style.top   = `${i * ITEM_H}px`;
+
+    const dot = document.createElement('div');
     dot.className = 'list-dot' + (annotations.has(fn) ? ' labeled' : '');
 
     const name = document.createElement('div');
@@ -573,22 +603,26 @@ function renderList() {
 
     div.appendChild(dot);
     div.appendChild(name);
-    div.addEventListener('click', () => navigateTo(idx));
+    div.addEventListener('click', () => navigateTo(i));
     frag.appendChild(div);
-  });
+  }
   listEl.appendChild(frag);
 }
 
+// Update a single visible item's dot (no-op if scrolled out of view)
 function updateListItem(fn) {
   const idx = filtered.indexOf(fn);
   if (idx < 0) return;
-  listEl.children[idx]?.querySelector('.list-dot')
-    .classList.toggle('labeled', annotations.has(fn));
+  const el = listEl.querySelector(`.list-item[data-idx="${idx}"]`);
+  if (el) el.querySelector('.list-dot').classList.toggle('labeled', annotations.has(fn));
 }
 
 function scrollListToActive() {
   const idx = filtered.indexOf(currentFile);
-  if (idx >= 0) listEl.children[idx]?.scrollIntoView({ block: 'nearest' });
+  if (idx < 0) return;
+  // Scroll so the active item is centred in the viewport
+  listEl.scrollTop = Math.max(0, idx * ITEM_H - listEl.clientHeight / 2 + ITEM_H / 2);
+  renderVisibleItems();
 }
 
 // ── 导航 ─────────────────────────────────────────────────────────────────────
@@ -598,15 +632,9 @@ function navigateTo(idx) {
   idx = Math.max(0, Math.min(filtered.length - 1, idx));
   const fn = filtered[idx];
 
-  if (currentFile) {
-    const old = filtered.indexOf(currentFile);
-    if (old >= 0) listEl.children[old]?.classList.remove('active');
-  }
-
   currentFile = fn;
   localStorage.setItem('lastPhoto', fn);
-  listEl.children[idx]?.classList.add('active');
-  scrollListToActive();
+  scrollListToActive(); // re-renders visible window with correct active state
 
   photoNameEl.textContent = fn;
   navInfoEl.textContent   = `${idx + 1} / ${filtered.length}`;
@@ -725,6 +753,8 @@ saveBtn.addEventListener('click', saveAndNext);
 
 document.getElementById('prev-btn').addEventListener('click', () => navigate(-1));
 document.getElementById('next-btn').addEventListener('click', () => navigate(1));
+
+listEl.addEventListener('scroll', renderVisibleItems);
 
 document.getElementById('export-btn').addEventListener('click', exportAnnotations);
 
