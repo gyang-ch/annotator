@@ -1,2 +1,6 @@
 # macOS
 .DS_Store
+
+# Local archive — not needed in the repo
+archive/
+annotations(*.jsonl
