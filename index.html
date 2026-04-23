@@ -414,20 +414,37 @@ async function listPhotos() {
   return await res.json();
 }
 
-// 从 localStorage 读取标注
-function loadAnnotations() {
+// 从 JSONL 文本解析标注 Map
+function parseJsonl(text) {
+  const map = new Map();
+  for (const line of text.split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    try { const r = JSON.parse(t); if (r.filename) map.set(r.filename, r); } catch {}
+  }
+  return map;
+}
+
+// 加载标注：先读取仓库种子文件，再用 localStorage 覆盖（本地优先）
+async function loadAnnotations() {
+  // 1. 种子文件（仓库中预存的标注）
+  let seed = new Map();
+  try {
+    const res = await fetch('./annotations.jsonl');
+    if (res.ok) seed = parseJsonl(await res.text());
+  } catch {}
+
+  // 2. 本地已有标注
+  let local = new Map();
   try {
     const raw = localStorage.getItem(LS_KEY);
-    if (!raw) return new Map();
-    const map = new Map();
-    for (const line of raw.split('\n')) {
-      const t = line.trim();
-      if (!t) continue;
-      const r = JSON.parse(t);
-      if (r.filename) map.set(r.filename, r);
-    }
-    return map;
-  } catch { return new Map(); }
+    if (raw) local = parseJsonl(raw);
+  } catch {}
+
+  // 3. 合并：本地标注覆盖种子（保护标注者已完成的工作）
+  const merged = new Map([...seed, ...local]);
+  saveAnnotations(merged);
+  return merged;
 }
 
 // 将标注写入 localStorage
@@ -497,8 +514,10 @@ const jumpBtn     = document.getElementById('jump-btn');
 async function init() {
   try {
     loadingMsg.textContent = '正在加载照片列表…';
-    allPhotos   = await listPhotos();
-    annotations = loadAnnotations();
+    allPhotos = await listPhotos();
+
+    loadingMsg.textContent = '正在加载已有标注…';
+    annotations = await loadAnnotations();
 
     loadingEl.style.display   = 'none';
     sidebarEl.style.display   = '';

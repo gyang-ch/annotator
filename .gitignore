@@ -1,5 +1,2 @@
 # macOS
 .DS_Store
-
-# Annotation exports — saved locally by annotators, not part of the repo
-annotations.jsonl
